@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "non-ai"
+version = "0.1.0"
+description = "Local AI coding agent powered by Ollama + Qwen2.5-Coder"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "obbsidiann" }]
+dependencies = [
+    "ollama>=0.4.0",
+]
+
+[project.scripts]
+non-ai = "non_ai.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/non_ai"]
