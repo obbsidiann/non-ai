@@ -8,6 +8,7 @@ from pathlib import Path
 from . import __version__
 from .agent import Agent
 from .config import CONFIG_FILE, Config
+from .memory import Session, SessionStore
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,6 +46,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--stdin",
         action="store_true",
         help="Прочитать вход из stdin (например: cat file.py | non-ai --stdin 'ревью').",
+    )
+        p.add_argument(
+        "-c", "--continue",
+        dest="continue_session",
+        action="store_true",
+        help="Продолжить последнюю сессию.",
+    )
+    p.add_argument(
+        "--resume",
+        metavar="SESSION_ID",
+        help="Загрузить сессию по ID.",
+    )
+    p.add_argument(
+        "--sessions",
+        action="store_true",
+        help="Показать список сессий и выйти.",
+    )
+    p.add_argument(
+        "--no-save",
+        action="store_true",
+        help="Не сохранять сессию на диск.",
     )
     return p
 
