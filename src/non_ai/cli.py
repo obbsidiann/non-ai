@@ -47,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Прочитать вход из stdin (например: cat file.py | non-ai --stdin 'ревью').",
     )
-        p.add_argument(
+    p.add_argument(
         "-c", "--continue",
         dest="continue_session",
         action="store_true",
@@ -80,7 +80,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Конфиг: {path}")
         return 0
 
-    # CLI overrides
     if args.model:
         config.model = args.model
     if args.temperature is not None:
@@ -92,9 +91,33 @@ def main(argv: list[str] | None = None) -> int:
         _print_config(config)
         return 0
 
-    agent = Agent(config)
+    # --- Инициализация хранилища сессий ---
+    store = SessionStore()
 
-     # Собираем контекст из файлов и/или stdin
+    if args.sessions:
+        _list_sessions(store)
+        return 0
+
+    session: Session | None = None
+    if args.resume:
+        session = store.load(args.resume)
+        if session is None:
+            print(f"[non-ai] Сессия {args.resume} не найдена.", file=sys.stderr)
+            return 1
+    elif args.continue_session:
+        session = store.latest()
+        if session is None:
+            print("[non-ai] Сессий нет, начинаю новую.")
+        else:
+            print(
+                f"[non-ai] Продолжаю сессию {session.id} "
+                f"(сообщений: {len(session.messages) - 1})"
+            )
+
+    autosave = not args.no_save
+    agent = Agent(config, store=store, session=session, autosave=autosave)
+
+    # --- Собираем контекст из файлов и/или stdin ---
     context_parts: list[str] = []
 
     for path_str in args.file:
@@ -110,23 +133,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.stdin:
         if sys.stdin.isatty():
-            print("[non-ai] --stdin указан, но stdin пуст (запущено в терминале).", file=sys.stderr)
+            print("[non-ai] --stdin указан, но stdin пуст.", file=sys.stderr)
             return 1
         stdin_content = sys.stdin.read()
         context_parts.append(f"### STDIN\n```\n{stdin_content}\n```")
 
-    # One-shot режим (prompt, файлы или stdin)
+    # --- One-shot режим ---
     if args.prompt or context_parts:
         user_prompt = " ".join(args.prompt).strip() or "Проанализируй этот код."
-
-        if context_parts:
-            full_prompt = (
-                "\n\n".join(context_parts)
-                + f"\n\n### REQUEST\n{user_prompt}"
-            )
-        else:
-            full_prompt = user_prompt
-
+        full_prompt = (
+            "\n\n".join(context_parts) + f"\n\n### REQUEST\n{user_prompt}"
+            if context_parts
+            else user_prompt
+        )
         try:
             for chunk in agent.ask(full_prompt):
                 print(chunk, end="", flush=True)
@@ -139,18 +158,36 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return 0
 
-    # Интерактивный режим
+    # --- Интерактивный режим ---
     return _interactive(agent)
 
+
+def _list_sessions(store: SessionStore) -> None:
+    sessions = store.list_sessions()
+    if not sessions:
+        print("Сессий пока нет.")
+        return
+    print(f"Сессий: {len(sessions)}\n")
+    for s in sessions:
+        msgs = len([m for m in s.messages if m.role != "system"])
+        print(f"  {s.id}  ({msgs} сообщ., модель: {s.model})")
+        print(f"    {s.preview()}")
+    print("\nПродолжить: non-ai --resume <id>")
+
+
 def _interactive(agent: Agent) -> int:
-    print(f"non-ai {__version__} | модель: {agent.config.model}")
-    print("Введите '/help' для команд, 'exit' или Ctrl+D для выхода.\n")
+    print(
+        f"non-ai {__version__} | модель: {agent.config.model} | "
+        f"сессия: {agent.session.id}"
+    )
+    print("Команды: /help, /new, /clear, /model <name>, /save, exit\n")
 
     while True:
         try:
             user_input = input("Вы: ")
         except (EOFError, KeyboardInterrupt):
             print("\nДо встречи!")
+            _final_save(agent)
             return 0
 
         stripped = user_input.strip()
@@ -159,9 +196,14 @@ def _interactive(agent: Agent) -> int:
 
         if stripped.lower() in ("exit", "quit", "выход"):
             print("До встречи!")
+            _final_save(agent)
             return 0
 
         if stripped.startswith("/"):
+            if stripped == "/new":
+                agent.reset()
+                print(f"[новая сессия: {agent.session.id}]")
+                continue
             _handle_command(stripped, agent)
             continue
 
@@ -178,15 +220,25 @@ def _interactive(agent: Agent) -> int:
             continue
 
 
+def _final_save(agent: Agent) -> None:
+    if agent.autosave and agent.store is not None:
+        try:
+            agent.store.save(agent.session)
+        except Exception:
+            pass
+
+
 def _handle_command(cmd: str, agent: Agent) -> None:
     name = cmd.split(maxsplit=1)[0].lower()
 
     if name in ("/help", "/?"):
         print("Команды:")
         print("  /help          — эта справка")
-        print("  /clear         — очистить контекст диалога")
-        print("  /config        — показать действующий конфиг")
+        print("  /new           — начать новую сессию")
+        print("  /clear         — очистить контекст текущей сессии")
+        print("  /config        — показать конфиг")
         print("  /model <name>  — сменить модель на лету")
+        print("  /save          — принудительно сохранить")
         print("  exit           — выйти")
     elif name == "/clear":
         agent.reset()
@@ -199,7 +251,14 @@ def _handle_command(cmd: str, agent: Agent) -> None:
             print("Использование: /model <name>")
             return
         agent.config.model = parts[1].strip()
+        agent.session.model = agent.config.model
         print(f"[модель: {agent.config.model}]")
+    elif name == "/save":
+        if agent.store is None:
+            print("[сохранение отключено]")
+            return
+        agent.store.save(agent.session)
+        print(f"[сохранено: {agent.session.id}]")
     else:
         print(f"Неизвестная команда: {name}. Набери /help.")
 
