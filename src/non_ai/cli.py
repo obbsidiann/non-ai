@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from . import __version__
 from .agent import Agent
@@ -33,6 +34,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Показать действующий конфиг и выйти.",
     )
     p.add_argument("--version", action="version", version=f"non-ai {__version__}")
+    p.add_argument(
+        "-f", "--file",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Файл для передачи агенту. Можно указать несколько раз.",
+    )
+    p.add_argument(
+        "--stdin",
+        action="store_true",
+        help="Прочитать вход из stdin (например: cat file.py | non-ai --stdin 'ревью').",
+    )
     return p
 
 
@@ -59,11 +72,41 @@ def main(argv: list[str] | None = None) -> int:
 
     agent = Agent(config)
 
-    # One-shot режим
-    if args.prompt:
-        prompt = " ".join(args.prompt)
+     # Собираем контекст из файлов и/или stdin
+    context_parts: list[str] = []
+
+    for path_str in args.file:
         try:
-            for chunk in agent.ask(prompt):
+            content = Path(path_str).read_text(encoding="utf-8")
+            context_parts.append(f"### FILE: {path_str}\n```\n{content}\n```")
+        except FileNotFoundError:
+            print(f"[non-ai] Файл не найден: {path_str}", file=sys.stderr)
+            return 1
+        except Exception as e:
+            print(f"[non-ai] Не удалось прочитать {path_str}: {e}", file=sys.stderr)
+            return 1
+
+    if args.stdin:
+        if sys.stdin.isatty():
+            print("[non-ai] --stdin указан, но stdin пуст (запущено в терминале).", file=sys.stderr)
+            return 1
+        stdin_content = sys.stdin.read()
+        context_parts.append(f"### STDIN\n```\n{stdin_content}\n```")
+
+    # One-shot режим (prompt, файлы или stdin)
+    if args.prompt or context_parts:
+        user_prompt = " ".join(args.prompt).strip() or "Проанализируй этот код."
+
+        if context_parts:
+            full_prompt = (
+                "\n\n".join(context_parts)
+                + f"\n\n### REQUEST\n{user_prompt}"
+            )
+        else:
+            full_prompt = user_prompt
+
+        try:
+            for chunk in agent.ask(full_prompt):
                 print(chunk, end="", flush=True)
             print()
         except KeyboardInterrupt:
@@ -76,7 +119,6 @@ def main(argv: list[str] | None = None) -> int:
 
     # Интерактивный режим
     return _interactive(agent)
-
 
 def _interactive(agent: Agent) -> int:
     print(f"non-ai {__version__} | модель: {agent.config.model}")
