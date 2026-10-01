@@ -42,7 +42,6 @@ def _save_index(index: dict) -> None:
 
 
 def backup_file(path: Path) -> Path | None:
-    """Сохранить копию файла в ~/.local/share/non-ai/backups/."""
     if not path.exists() or not path.is_file():
         return None
 
@@ -71,7 +70,7 @@ def backup_file(path: Path) -> Path | None:
     return backup_path
 
 
-# --- Показ diff ---
+# --- Показ изменений ---
 
 def _print_preview(path: Path, new_content: str, existed: bool) -> None:
     import difflib
@@ -141,6 +140,17 @@ def _ask_confirm() -> bool:
     return answer in ("y", "yes", "д", "да")
 
 
+def _collect_missing_parents(p: Path) -> list[Path]:
+    """Найти все несуществующие родительские директории для p."""
+    missing: list[Path] = []
+    cur = p.parent
+    while not cur.exists() and cur != cur.parent:
+        missing.append(cur)
+        cur = cur.parent
+    missing.reverse()
+    return missing
+
+
 # --- Инструменты ---
 
 def read_file(path: str) -> str:
@@ -149,7 +159,7 @@ def read_file(path: str) -> str:
         return f"ОШИБКА: файл не найден: {path}"
     if p.is_dir():
         return (
-            f'ОШИБКА: {path} — это директория, а не файл. '
+            f'ОШИБКА: {path} — это директория. '
             f'Вызови: <list_dir path="{path}" />'
         )
     try:
@@ -195,8 +205,45 @@ def list_dir(path: str = ".") -> str:
     return "\n".join(lines)
 
 
+def create_dir(path: str) -> str:
+    """Создать директорию (включая все родительские)."""
+    p = Path(path).expanduser()
+
+    if p.exists():
+        if p.is_dir():
+            return f"OK: директория уже существует: {path}"
+        return f"ОШИБКА: {path} существует, но это файл, а не директория."
+
+    if not sys.stdin.isatty():
+        return "ОШИБКА: подтверждение недоступно (stdin не терминал)."
+
+    missing = _collect_missing_parents(p)
+    full_chain = missing + [p]
+
+    print()
+    print(f"  📁 Предлагаю создать директорию: {path}")
+    if len(full_chain) > 1:
+        print(f"     (включая {len(full_chain) - 1} промежуточных)")
+    for d in full_chain:
+        print(f"     + {d}")
+    print()
+
+    if not _ask_confirm():
+        return "ОТМЕНЕНО пользователем."
+
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        return f"ОШИБКА: нет прав на создание {path}"
+    except Exception as e:
+        return f"ОШИБКА при создании: {e}"
+
+    return f"OK: директория создана: {path}"
+
+
 def write_file(path: str, content: str) -> str:
-    """Создать НОВЫЙ файл. Существующий — отказ, используй edit_file."""
+    """Создать НОВЫЙ файл. Родительские директории создаются автоматически.
+    Существующий файл — отказ, используй edit_file."""
     p = Path(path).expanduser()
 
     if p.exists():
@@ -209,6 +256,14 @@ def write_file(path: str, content: str) -> str:
     if not sys.stdin.isatty():
         return "ОШИБКА: подтверждение записи недоступно (stdin не терминал)."
 
+    # Что создастся попутно
+    missing_parents = _collect_missing_parents(p)
+
+    print()
+    if missing_parents:
+        print(f"  📁 Попутно создадутся директории:")
+        for d in missing_parents:
+            print(f"     + {d}")
     _print_preview(p, content, existed=False)
 
     if not _ask_confirm():
@@ -316,11 +371,22 @@ TOOLS: dict[str, Tool] = {
         schema='<list_dir path="путь/к/папке" />',
         handler=list_dir,
     ),
+    "create_dir": Tool(
+        name="create_dir",
+        description=(
+            "Создать директорию. Родительские создаются автоматически. "
+            "Если директория уже существует — просто подтвердит."
+        ),
+        schema='<create_dir path="путь/к/папке" />',
+        handler=create_dir,
+    ),
     "write_file": Tool(
         name="write_file",
         description=(
-            "Создать НОВЫЙ файл. Если файл уже существует — будет ошибка, "
-            "используй edit_file."
+            "Создать НОВЫЙ файл с указанным содержимым. "
+            "Родительские директории создаются автоматически, "
+            "отдельно create_dir вызывать не нужно. "
+            "Если файл уже существует — ошибка, используй edit_file."
         ),
         schema=(
             '<write_file path="путь/к/новому/файлу">\n'
@@ -355,7 +421,7 @@ TOOLS: dict[str, Tool] = {
 # --- Парсер вызовов ---
 
 _SIMPLE_RE = re.compile(
-    r'<(read_file|list_dir)\s+path="([^"]*)"\s*/?>',
+    r'<(read_file|list_dir|create_dir)\s+path="([^"]*)"\s*/?>',
     re.IGNORECASE,
 )
 
@@ -374,21 +440,17 @@ _EDIT_RE = re.compile(
 
 
 def parse_tool_calls(text: str) -> list[tuple[str, dict]]:
-    """Найти все вызовы инструментов в тексте модели."""
     calls: list[tuple[str, dict]] = []
 
-    # edit_file — первым (сложнее, иначе могут пересечься с write)
     for m in _EDIT_RE.finditer(text):
         calls.append((
             "edit_file",
             {"path": m.group(1), "old": m.group(2), "new": m.group(3)},
         ))
 
-    # write_file
     for m in _WRITE_RE.finditer(text):
         calls.append(("write_file", {"path": m.group(1), "content": m.group(2)}))
 
-    # read_file / list_dir
     for m in _SIMPLE_RE.finditer(text):
         calls.append((m.group(1).lower(), {"path": m.group(2)}))
 
@@ -408,7 +470,6 @@ def execute_tool(name: str, args: dict) -> str:
 
 
 def tools_prompt() -> str:
-    """Системная инструкция — какие инструменты есть и как их вызывать."""
     lines = [
         "## Инструменты",
         "",
@@ -423,14 +484,16 @@ def tools_prompt() -> str:
         "## Правила",
         "",
         "1. Посмотреть файл — read_file. Посмотреть папку — list_dir.",
-        "2. Изменить СУЩЕСТВУЮЩИЙ файл — используй edit_file:",
+        "2. Создать новую папку — create_dir.",
+        "3. Создать новый файл — write_file. Родительские папки создаст сам, "
+        "отдельно create_dir вызывать не нужно.",
+        "4. Изменить СУЩЕСТВУЮЩИЙ файл — используй edit_file:",
         "   СНАЧАЛА прочитай файл через read_file, потом скопируй нужный фрагмент",
         "   в <old> ДОСЛОВНО (со всеми отступами), а в <new> — чем заменить.",
         "   Фрагмент <old> должен быть уникальным в файле, иначе ошибка.",
-        "3. Создать НОВЫЙ файл — используй write_file с полным содержимым.",
-        "4. Выводи тег БЕЗ обёрток вида ```xml, только чистый XML.",
-        "5. После вызова инструмента придёт <result>...</result> — "
+        "5. Выводи тег БЕЗ обёрток вида ```xml, только чистый XML.",
+        "6. После вызова инструмента придёт <result>...</result> — "
         "продолжи работу или ответь пользователю текстом (без тегов).",
-        "6. Не выдумывай содержимое файлов. Не редактируй, не прочитав файл.",
+        "7. Не выдумывай содержимое файлов. Не редактируй, не прочитав файл.",
     ]
     return "\n".join(lines)

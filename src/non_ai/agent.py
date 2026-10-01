@@ -14,10 +14,9 @@ from .tools import execute_tool, parse_tool_calls, tools_prompt
 _TOOL_TAG_RE = re.compile(
     r"```(?:xml|XML)?\s*\n?"
     r"|```\s*\n?"
-    r"|</?(?:read_file|list_dir|write_file|edit_file)\b[^>]*/?>",
+    r"|</?(?:read_file|list_dir|create_dir|write_file|edit_file)\b[^>]*/?>",
     re.IGNORECASE,
 )
-
 _WRITE_BLOCK_RE = re.compile(
     r'<write_file\s+path="[^"]+"\s*>.*?</write_file>',
     re.DOTALL | re.IGNORECASE,
@@ -143,7 +142,7 @@ class Agent:
             # Показываем, что агент делает.
             # write_file и edit_file сами показывают preview с diff.
             for name, args in new_calls:
-                if name in ("write_file", "edit_file"):
+                if name in ("write_file", "edit_file", "create_dir"):
                     continue
                 path = args.get("path", "")
                 yield f"\n  ⚙  {name}({path})\n"
