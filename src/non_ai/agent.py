@@ -12,16 +12,28 @@ from .tools import execute_tool, parse_tool_calls, tools_prompt
 
 
 _TOOL_TAG_RE = re.compile(
-    r"```(?:xml|XML)?\s*\n?"                       # открывающий ```
-    r"|```\s*\n?"                                   # закрывающий ```
-    r"|</?(?:read_file|list_dir)\b[^>]*/?>",        # сам тег
+    r"```(?:xml|XML)?\s*\n?"
+    r"|```\s*\n?"
+    r"|</?(?:read_file|list_dir|write_file|edit_file)\b[^>]*/?>",
     re.IGNORECASE,
+)
+
+_WRITE_BLOCK_RE = re.compile(
+    r'<write_file\s+path="[^"]+"\s*>.*?</write_file>',
+    re.DOTALL | re.IGNORECASE,
+)
+
+_EDIT_BLOCK_RE = re.compile(
+    r'<edit_file\s+path="[^"]+"\s*>.*?</edit_file>',
+    re.DOTALL | re.IGNORECASE,
 )
 
 
 def _clean_display(text: str) -> str:
-    """Убирает XML-теги инструментов и обёртки ```xml из ответа модели."""
-    cleaned = _TOOL_TAG_RE.sub("", text)
+    """Убирает XML-блоки инструментов из ответа модели."""
+    cleaned = _EDIT_BLOCK_RE.sub("", text)
+    cleaned = _WRITE_BLOCK_RE.sub("", cleaned)
+    cleaned = _TOOL_TAG_RE.sub("", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
 
@@ -49,7 +61,6 @@ class Agent:
 
         if session is not None:
             self.session = session
-            # Обновляем системный промпт в загруженной сессии
             if self.session.messages and self.session.messages[0].role == "system":
                 self.session.messages[0].content = system
         elif store is not None:
@@ -129,8 +140,11 @@ class Agent:
                 yield "\n[non-ai] Повторный вызов инструмента, останавливаюсь.\n"
                 break
 
-            # Показываем пользователю, что агент делает
+            # Показываем, что агент делает.
+            # write_file и edit_file сами показывают preview с diff.
             for name, args in new_calls:
+                if name in ("write_file", "edit_file"):
+                    continue
                 path = args.get("path", "")
                 yield f"\n  ⚙  {name}({path})\n"
 
