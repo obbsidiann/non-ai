@@ -14,9 +14,10 @@ from .tools import execute_tool, parse_tool_calls, tools_prompt
 _TOOL_TAG_RE = re.compile(
     r"```(?:xml|XML)?\s*\n?"
     r"|```\s*\n?"
-    r"|</?(?:read_file|list_dir|create_dir|write_file|edit_file)\b[^>]*/?>",
+    r"|</?(?:read_file|list_dir|create_dir|write_file|edit_file|run_shell)\b[^>]*/?>",
     re.IGNORECASE,
 )
+
 _WRITE_BLOCK_RE = re.compile(
     r'<write_file\s+path="[^"]+"\s*>.*?</write_file>',
     re.DOTALL | re.IGNORECASE,
@@ -27,11 +28,24 @@ _EDIT_BLOCK_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
+_RUN_SHELL_BLOCK_RE = re.compile(
+    r'<run_shell\s*>.*?</run_shell>',
+    re.DOTALL | re.IGNORECASE,
+)
+
+# Модель иногда пишет <result> сама — фильтруем
+_FAKE_RESULT_RE = re.compile(
+    r'<result\b[^>]*>.*?</result>',
+    re.DOTALL | re.IGNORECASE,
+)
+
 
 def _clean_display(text: str) -> str:
-    """Убирает XML-блоки инструментов из ответа модели."""
+    """Убирает XML-блоки инструментов и фейковые <result> из ответа модели."""
     cleaned = _EDIT_BLOCK_RE.sub("", text)
     cleaned = _WRITE_BLOCK_RE.sub("", cleaned)
+    cleaned = _RUN_SHELL_BLOCK_RE.sub("", cleaned)
+    cleaned = _FAKE_RESULT_RE.sub("", cleaned)
     cleaned = _TOOL_TAG_RE.sub("", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
@@ -94,6 +108,8 @@ class Agent:
 
         iterations = self.MAX_TOOL_ITERATIONS if allow_tools else 1
         seen_calls: set[str] = set()
+        fake_result_retries = 0
+        MAX_FAKE_RETRIES = 2
 
         for _ in range(iterations):
             # Собираем ответ полностью — потом отфильтруем tool-теги
@@ -123,13 +139,35 @@ class Agent:
 
             calls = parse_tool_calls(collected)
             if not calls:
+                # Модель ответила без вызовов. Если она при этом
+                # написала фейковый <result>, значит соврала — просим переделать.
+                had_fake_result = bool(_FAKE_RESULT_RE.search(collected))
+                if had_fake_result and fake_result_retries < MAX_FAKE_RETRIES:
+                    fake_result_retries += 1
+                    self.session.messages.append(
+                        Message(
+                            role="user",
+                            content=(
+                                "## ОШИБКА СИСТЕМЫ\n"
+                                "Ты написал <result> сам, но это запрещено. "
+                                "<result> приходит ТОЛЬКО от системы в ответ "
+                                "на вызов инструмента. Если тебе нужна информация — "
+                                "вызови инструмент (read_file / list_dir / run_shell) "
+                                "и дождись ответа. Если информация не нужна — "
+                                "ответь пользователю текстом без тегов. "
+                                "Попробуй ещё раз."
+                            ),
+                        )
+                    )
+                    continue  # ещё одна итерация
+
                 yield _clean_display(collected)
                 break
 
             # Отсеиваем повторные вызовы
             new_calls: list[tuple[str, dict]] = []
             for name, args in calls:
-                key = f"{name}:{args.get('path', '')}"
+                key = f"{name}:{args.get('path', '') or args.get('cmd', '')}"
                 if key in seen_calls:
                     continue
                 seen_calls.add(key)
@@ -140,9 +178,9 @@ class Agent:
                 break
 
             # Показываем, что агент делает.
-            # write_file и edit_file сами показывают preview с diff.
+            # write_file / edit_file / create_dir / run_shell показывают свой preview.
             for name, args in new_calls:
-                if name in ("write_file", "edit_file", "create_dir"):
+                if name in ("write_file", "edit_file", "create_dir", "run_shell"):
                     continue
                 path = args.get("path", "")
                 yield f"\n  ⚙  {name}({path})\n"
