@@ -73,6 +73,27 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Отключить инструменты (агент просто отвечает текстом).",
     )
+    p.add_argument(
+        "--backups",
+        action="store_true",
+        help="Показать все файлы с бэкапами и выйти.",
+    )
+    p.add_argument(
+        "--backups-for",
+        metavar="FILE",
+        help="Показать все бэкапы конкретного файла.",
+    )
+    p.add_argument(
+        "--restore",
+        nargs="+",
+        metavar="FILE",
+        help="Восстановить файл из бэкапа: --restore FILE [TIMESTAMP]",
+    )
+    p.add_argument(
+        "--diff-backup",
+        metavar="FILE",
+        help="Показать diff между последним бэкапом и текущим файлом.",
+    )
     return p
 
 
@@ -94,6 +115,30 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.show_config:
         _print_config(config)
+        return 0
+        # --- Команды бэкапов (не требуют агента) ---
+    if args.backups:
+        from .backups import format_all
+        print(format_all())
+        return 0
+
+    if args.backups_for:
+        from .backups import format_one
+        print(format_one(args.backups_for))
+        return 0
+
+    if args.restore:
+        if len(args.restore) > 2:
+            print("Использование: --restore FILE [TIMESTAMP]", file=sys.stderr)
+            return 1
+        from .backups import restore
+        ts = args.restore[1] if len(args.restore) == 2 else None
+        print(restore(args.restore[0], ts))
+        return 0
+
+    if args.diff_backup:
+        from .backups import diff_latest
+        print(diff_latest(args.diff_backup))
         return 0
 
     # --- Инициализация хранилища сессий ---
