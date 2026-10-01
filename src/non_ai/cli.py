@@ -68,6 +68,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Не сохранять сессию на диск.",
     )
+    p.add_argument(
+        "--no-tools",
+        action="store_true",
+        help="Отключить инструменты (агент просто отвечает текстом).",
+    )
     return p
 
 
@@ -113,10 +118,14 @@ def main(argv: list[str] | None = None) -> int:
                 f"[non-ai] Продолжаю сессию {session.id} "
                 f"(сообщений: {len(session.messages) - 1})"
             )
-
     autosave = not args.no_save
-    agent = Agent(config, store=store, session=session, autosave=autosave)
-
+    agent = Agent(
+        config,
+        store=store,
+        session=session,
+        autosave=autosave,
+        enable_tools=not args.no_tools,
+    )
     # --- Собираем контекст из файлов и/или stdin ---
     context_parts: list[str] = []
 
