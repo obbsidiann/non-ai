@@ -106,7 +106,8 @@ class Agent:
         iterations = self.MAX_TOOL_ITERATIONS if allow_tools else 1
         seen_calls: set[str] = set()
         fake_result_retries = 0
-        MAX_FAKE_RETRIES = 2
+        MAX_FAKE_RETRIES = 4
+        produced_text = False  # был ли хоть какой-то текст для пользователя
 
         for _ in range(iterations):
             stream = ollama.chat(
@@ -130,32 +131,49 @@ class Agent:
             self.session.messages.append(Message(role="assistant", content=collected))
 
             if not allow_tools:
-                yield _clean_display(collected)
+                cleaned = _clean_display(collected)
+                if cleaned:
+                    produced_text = True
+                    yield cleaned
                 break
 
             calls = parse_tool_calls(collected)
             if not calls:
-                had_fake_result = bool(_FAKE_RESULT_RE.search(collected))
-                if had_fake_result and fake_result_retries < MAX_FAKE_RETRIES:
+                # Модель не вызвала инструмент. Проверяем фейк <result>
+                had_fake = bool(_FAKE_RESULT_RE.search(collected))
+                if had_fake and fake_result_retries < MAX_FAKE_RETRIES:
                     fake_result_retries += 1
                     self.session.messages.append(
                         Message(
                             role="user",
                             content=(
-                                "## ОШИБКА СИСТЕМЫ\n"
-                                "Ты написал <result> сам — это запрещено. "
-                                "<result> приходит ТОЛЬКО от системы. "
-                                "Если нужна информация — вызови инструмент. "
-                                "Попробуй ещё раз."
+                                "## КРИТИЧЕСКАЯ ОШИБКА\n"
+                                "Ты написал <result>...</result> САМ, без вызова инструмента. "
+                                "Это категорически запрещено. <result> приходит ТОЛЬКО от системы.\n\n"
+                                "Ты должен ВЫЗВАТЬ инструмент, написав XML-тег. Примеры:\n"
+                                '  <list_dir path="." />\n'
+                                '  <read_file path="README.md" />\n'
+                                '  <run_shell>\nls -la\n</run_shell>\n\n'
+                                "Напиши СЕЙЧАС ТОЛЬКО тег нужного инструмента и НИЧЕГО больше."
                             ),
                         )
                     )
                     continue
 
-                yield _clean_display(collected)
+                # Отдаём всё, что осталось после чистки
+                cleaned = _clean_display(collected)
+                if cleaned:
+                    produced_text = True
+                    yield cleaned
+                else:
+                    yield (
+                        "\n[Модель не смогла ответить — вероятно, потерялась. "
+                        "Попробуй переформулировать, использовать /new "
+                        "или /model qwen2.5-coder:7b]\n"
+                    )
                 break
 
-            # Отсеиваем повторы + whitelist
+            # Отсев повторов + whitelist
             new_calls: list[tuple[str, dict]] = []
             blocked: list[str] = []
             for name, args in calls:
@@ -168,10 +186,17 @@ class Agent:
                 seen_calls.add(key)
                 new_calls.append((name, args))
 
+            # Показываем текст модели ДО вызова инструментов (если был)
+            pre_text = _clean_display(collected)
+            if pre_text:
+                produced_text = True
+                yield f"\n{pre_text}\n"
+
             if not new_calls and not blocked:
                 yield "\n[non-ai] Повторный вызов, останавливаюсь.\n"
                 break
 
+            # Маркер действий (только для read-only инструментов)
             for name, args in new_calls:
                 if name in ("write_file", "edit_file", "create_dir", "run_shell"):
                     continue
@@ -197,6 +222,12 @@ class Agent:
             )
             self.session.messages.append(
                 Message(role="user", content="\n\n".join(results) + hint)
+            )
+
+        if not produced_text:
+            yield (
+                "\n[non-ai] Модель не дала осмысленного ответа. "
+                "Попробуй /new или другую модель]\n"
             )
 
         self.session.model = self.config.model
