@@ -12,7 +12,7 @@ set -euo pipefail
 
 # --- Настройки ---
 MODEL="${NON_AI_MODEL:-qwen2.5-coder:1.5b}"
-BIN_DIR="$HOME/.local/bin"
+BIN_DIR="${NON_AI_BIN_DIR:-$HOME/.local/bin}"
 MIN_PYTHON="3.11"
 
 # --- Цветной вывод (только если в терминале) ---
@@ -92,7 +92,6 @@ check_ollama() {
     if command -v pacman >/dev/null 2>&1; then
         sudo pacman -S --noconfirm ollama
     else
-        # Официальный скрипт — работает на Debian/Ubuntu/Fedora/RHEL/openSUSE
         curl -fsSL https://ollama.com/install.sh | sh
     fi
     ok "Ollama установлен"
