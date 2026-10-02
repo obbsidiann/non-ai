@@ -33,7 +33,6 @@ _RUN_SHELL_BLOCK_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
-# Модель иногда пишет <result> сама — фильтруем
 _FAKE_RESULT_RE = re.compile(
     r'<result\b[^>]*>.*?</result>',
     re.DOTALL | re.IGNORECASE,
@@ -41,7 +40,6 @@ _FAKE_RESULT_RE = re.compile(
 
 
 def _clean_display(text: str) -> str:
-    """Убирает XML-блоки инструментов и фейковые <result> из ответа модели."""
     cleaned = _EDIT_BLOCK_RE.sub("", text)
     cleaned = _WRITE_BLOCK_RE.sub("", cleaned)
     cleaned = _RUN_SHELL_BLOCK_RE.sub("", cleaned)
@@ -61,13 +59,14 @@ class Agent:
         session: Session | None = None,
         autosave: bool = True,
         enable_tools: bool = True,
+        allowed_tools: set[str] | None = None,
     ):
         self.config = config
         self.store = store
         self.autosave = autosave and store is not None
         self.enable_tools = enable_tools
+        self.allowed_tools = allowed_tools  # None = все разрешены
 
-        # Собираем системный промпт
         system = config.system_prompt
         if enable_tools:
             system = system.rstrip() + "\n\n" + tools_prompt()
@@ -92,7 +91,6 @@ class Agent:
         return self.session.messages
 
     def reset(self) -> None:
-        """Начать новую сессию с чистого листа."""
         system = self.config.system_prompt
         if self.enable_tools:
             system = system.rstrip() + "\n\n" + tools_prompt()
@@ -103,7 +101,6 @@ class Agent:
             self.session.messages = [Message(role="system", content=system)]
 
     def ask(self, user_input: str, allow_tools: bool = True) -> Iterator[str]:
-        """Спросить агента. Отдаёт текст по кусочкам (стриминг)."""
         self.session.messages.append(Message(role="user", content=user_input))
 
         iterations = self.MAX_TOOL_ITERATIONS if allow_tools else 1
@@ -112,7 +109,6 @@ class Agent:
         MAX_FAKE_RETRIES = 2
 
         for _ in range(iterations):
-            # Собираем ответ полностью — потом отфильтруем tool-теги
             stream = ollama.chat(
                 model=self.config.model,
                 messages=[
@@ -139,8 +135,6 @@ class Agent:
 
             calls = parse_tool_calls(collected)
             if not calls:
-                # Модель ответила без вызовов. Если она при этом
-                # написала фейковый <result>, значит соврала — просим переделать.
                 had_fake_result = bool(_FAKE_RESULT_RE.search(collected))
                 if had_fake_result and fake_result_retries < MAX_FAKE_RETRIES:
                     fake_result_retries += 1
@@ -149,53 +143,57 @@ class Agent:
                             role="user",
                             content=(
                                 "## ОШИБКА СИСТЕМЫ\n"
-                                "Ты написал <result> сам, но это запрещено. "
-                                "<result> приходит ТОЛЬКО от системы в ответ "
-                                "на вызов инструмента. Если тебе нужна информация — "
-                                "вызови инструмент (read_file / list_dir / run_shell) "
-                                "и дождись ответа. Если информация не нужна — "
-                                "ответь пользователю текстом без тегов. "
+                                "Ты написал <result> сам — это запрещено. "
+                                "<result> приходит ТОЛЬКО от системы. "
+                                "Если нужна информация — вызови инструмент. "
                                 "Попробуй ещё раз."
                             ),
                         )
                     )
-                    continue  # ещё одна итерация
+                    continue
 
                 yield _clean_display(collected)
                 break
 
-            # Отсеиваем повторные вызовы
+            # Отсеиваем повторы + whitelist
             new_calls: list[tuple[str, dict]] = []
+            blocked: list[str] = []
             for name, args in calls:
+                if self.allowed_tools is not None and name not in self.allowed_tools:
+                    blocked.append(name)
+                    continue
                 key = f"{name}:{args.get('path', '') or args.get('cmd', '')}"
                 if key in seen_calls:
                     continue
                 seen_calls.add(key)
                 new_calls.append((name, args))
 
-            if not new_calls:
-                yield "\n[non-ai] Повторный вызов инструмента, останавливаюсь.\n"
+            if not new_calls and not blocked:
+                yield "\n[non-ai] Повторный вызов, останавливаюсь.\n"
                 break
 
-            # Показываем, что агент делает.
-            # write_file / edit_file / create_dir / run_shell показывают свой preview.
             for name, args in new_calls:
                 if name in ("write_file", "edit_file", "create_dir", "run_shell"):
                     continue
                 path = args.get("path", "")
                 yield f"\n  ⚙  {name}({path})\n"
 
-            # Выполняем и складываем результаты
             results: list[str] = []
+            for name in blocked:
+                results.append(
+                    f'<result tool="{name}">\n'
+                    f'ОШИБКА: инструмент {name} недоступен в текущем режиме.\n'
+                    f'</result>'
+                )
             for name, args in new_calls:
                 result = execute_tool(name, args)
                 results.append(f'<result tool="{name}">\n{result}\n</result>')
 
             hint = (
                 "\n\n## ВАЖНО\n"
-                "Ответь пользователю текстом на основе этих результатов. "
-                "НЕ вызывай инструменты повторно, если это не нужно для новой информации. "
-                "Не оборачивай вызовы в ```xml и не пиши сами теги в ответе."
+                "Ответь пользователю текстом на основе результатов. "
+                "НЕ вызывай инструменты повторно. "
+                "Не оборачивай вызовы в ```xml."
             )
             self.session.messages.append(
                 Message(role="user", content="\n\n".join(results) + hint)

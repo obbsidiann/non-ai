@@ -16,84 +16,41 @@ def build_parser() -> argparse.ArgumentParser:
         prog="non-ai",
         description="Локальный ИИ-ассистент на базе Ollama.",
     )
-    p.add_argument(
-        "prompt",
-        nargs="*",
-        help="Одиночный запрос. Если пусто — интерактивный режим.",
-    )
+    p.add_argument("prompt", nargs="*", help="Одиночный запрос.")
     p.add_argument("-m", "--model", help="Переопределить модель.")
-    p.add_argument("-t", "--temperature", type=float, help="Переопределить temperature.")
-    p.add_argument("-l", "--lang", choices=["ru", "en"], help="Язык ответов.")
-    p.add_argument(
-        "--init-config",
-        action="store_true",
-        help="Создать дефолтный конфиг в ~/.config/non-ai/config.toml и выйти.",
-    )
-    p.add_argument(
-        "--show-config",
-        action="store_true",
-        help="Показать действующий конфиг и выйти.",
-    )
+    p.add_argument("-t", "--temperature", type=float)
+    p.add_argument("-l", "--lang", choices=["ru", "en"])
+    p.add_argument("--init-config", action="store_true")
+    p.add_argument("--show-config", action="store_true")
     p.add_argument("--version", action="version", version=f"non-ai {__version__}")
-    p.add_argument(
-        "-f", "--file",
-        action="append",
-        default=[],
-        metavar="PATH",
-        help="Файл для передачи агенту. Можно указать несколько раз.",
-    )
-    p.add_argument(
-        "--stdin",
-        action="store_true",
-        help="Прочитать вход из stdin (например: cat file.py | non-ai --stdin 'ревью').",
-    )
+    p.add_argument("-f", "--file", action="append", default=[], metavar="PATH")
+    p.add_argument("--stdin", action="store_true")
     p.add_argument(
         "-c", "--continue",
-        dest="continue_session",
-        action="store_true",
+        dest="continue_session", action="store_true",
         help="Продолжить последнюю сессию.",
     )
-    p.add_argument(
-        "--resume",
-        metavar="SESSION_ID",
-        help="Загрузить сессию по ID.",
-    )
-    p.add_argument(
-        "--sessions",
-        action="store_true",
-        help="Показать список сессий и выйти.",
-    )
-    p.add_argument(
-        "--no-save",
-        action="store_true",
-        help="Не сохранять сессию на диск.",
-    )
-    p.add_argument(
-        "--no-tools",
-        action="store_true",
-        help="Отключить инструменты (агент просто отвечает текстом).",
-    )
-    p.add_argument(
-        "--backups",
-        action="store_true",
-        help="Показать все файлы с бэкапами и выйти.",
-    )
-    p.add_argument(
-        "--backups-for",
-        metavar="FILE",
-        help="Показать все бэкапы конкретного файла.",
-    )
-    p.add_argument(
-        "--restore",
-        nargs="+",
-        metavar="FILE",
-        help="Восстановить файл из бэкапа: --restore FILE [TIMESTAMP]",
-    )
-    p.add_argument(
-        "--diff-backup",
-        metavar="FILE",
-        help="Показать diff между последним бэкапом и текущим файлом.",
-    )
+    p.add_argument("--resume", metavar="SESSION_ID")
+    p.add_argument("--sessions", action="store_true")
+    p.add_argument("--no-save", action="store_true")
+    p.add_argument("--no-tools", action="store_true")
+
+    # Бэкапы
+    p.add_argument("--backups", action="store_true",
+                   help="Показать все файлы с бэкапами.")
+    p.add_argument("--backups-for", metavar="FILE",
+                   help="Показать бэкапы конкретного файла.")
+    p.add_argument("--restore", nargs="+", metavar="FILE",
+                   help="Восстановить файл: --restore FILE [TIMESTAMP]")
+    p.add_argument("--diff-backup", metavar="FILE",
+                   help="Diff между последним бэкапом и текущим.")
+
+    # Telegram
+    p.add_argument("--telegram", action="store_true",
+                   help="Запустить Telegram-бота.")
+    p.add_argument("--telegram-setup", action="store_true",
+                   help="Настроить токен Telegram-бота.")
+
     return p
 
 
@@ -116,7 +73,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.show_config:
         _print_config(config)
         return 0
-        # --- Команды бэкапов (не требуют агента) ---
+
+    # --- Команды бэкапов ---
     if args.backups:
         from .backups import format_all
         print(format_all())
@@ -141,7 +99,16 @@ def main(argv: list[str] | None = None) -> int:
         print(diff_latest(args.diff_backup))
         return 0
 
-    # --- Инициализация хранилища сессий ---
+    # --- Telegram ---
+    if args.telegram_setup:
+        from .telegram_bot import setup_interactive
+        return setup_interactive()
+
+    if args.telegram:
+        from .telegram_bot import run_bot
+        return run_bot(config)
+
+    # --- Сессии ---
     store = SessionStore()
 
     if args.sessions:
@@ -163,15 +130,16 @@ def main(argv: list[str] | None = None) -> int:
                 f"[non-ai] Продолжаю сессию {session.id} "
                 f"(сообщений: {len(session.messages) - 1})"
             )
-    autosave = not args.no_save
+
     agent = Agent(
         config,
         store=store,
         session=session,
-        autosave=autosave,
+        autosave=not args.no_save,
         enable_tools=not args.no_tools,
     )
-    # --- Собираем контекст из файлов и/или stdin ---
+
+    # --- Контекст из файлов/stdin ---
     context_parts: list[str] = []
 
     for path_str in args.file:
@@ -192,13 +160,12 @@ def main(argv: list[str] | None = None) -> int:
         stdin_content = sys.stdin.read()
         context_parts.append(f"### STDIN\n```\n{stdin_content}\n```")
 
-    # --- One-shot режим ---
+    # --- One-shot ---
     if args.prompt or context_parts:
         user_prompt = " ".join(args.prompt).strip() or "Проанализируй этот код."
         full_prompt = (
             "\n\n".join(context_parts) + f"\n\n### REQUEST\n{user_prompt}"
-            if context_parts
-            else user_prompt
+            if context_parts else user_prompt
         )
         try:
             for chunk in agent.ask(full_prompt):
@@ -212,7 +179,6 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return 0
 
-    # --- Интерактивный режим ---
     return _interactive(agent)
 
 
@@ -288,11 +254,11 @@ def _handle_command(cmd: str, agent: Agent) -> None:
     if name in ("/help", "/?"):
         print("Команды:")
         print("  /help          — эта справка")
-        print("  /new           — начать новую сессию")
-        print("  /clear         — очистить контекст текущей сессии")
+        print("  /new           — новая сессия")
+        print("  /clear         — очистить контекст")
         print("  /config        — показать конфиг")
-        print("  /model <name>  — сменить модель на лету")
-        print("  /save          — принудительно сохранить")
+        print("  /model <name>  — сменить модель")
+        print("  /save          — сохранить")
         print("  exit           — выйти")
     elif name == "/clear":
         agent.reset()

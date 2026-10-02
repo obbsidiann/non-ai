@@ -34,8 +34,7 @@ def format_all() -> str:
         backups = sorted(d.glob("*.bak"))
         if not backups:
             continue
-        latest_mtime = backups[-1].stat().st_mtime
-        items.append((latest_mtime, orig_path, len(backups), backups[-1].name))
+        items.append((backups[-1].stat().st_mtime, orig_path, len(backups), backups[-1].name))
 
     if not items:
         return "Бэкапов пока нет."
@@ -48,8 +47,8 @@ def format_all() -> str:
         lines.append(f"  {count:>3} версий  {orig_path}")
         lines.append(f"              последний: {ts}")
     lines.append("")
-    lines.append(f"Подробнее о файле:  non-ai --backups-for <FILE>")
-    lines.append(f"Восстановить:       non-ai --restore <FILE> [TIMESTAMP]")
+    lines.append("Подробнее:       non-ai --backups-for <FILE>")
+    lines.append("Восстановить:    non-ai --restore <FILE> [TIMESTAMP]")
     return "\n".join(lines)
 
 
@@ -84,15 +83,11 @@ def restore(path_str: str, timestamp: str | None = None) -> str:
         candidates = [b for b in backups if timestamp in b.name]
         if not candidates:
             names = [b.name for b in backups]
-            return (
-                f"Бэкап с '{timestamp}' не найден.\n"
-                f"Доступные: {names}"
-            )
+            return f"Бэкап с '{timestamp}' не найден.\nДоступные: {names}"
         target = candidates[-1]
     else:
         target = backups[-1]
 
-    # Сохраняем текущее состояние перед восстановлением
     if path.exists():
         backup_file(path)
 
@@ -131,19 +126,4 @@ def diff_latest(path_str: str) -> str:
     if not diff:
         return f"{path} идентичен последнему бэкапу."
 
-    # Цветной вывод
-    lines = []
-    for line in diff:
-        line = line.rstrip("\n")
-        if line.startswith("+++") or line.startswith("---"):
-            lines.append(f"\033[1m{line}\033[0m")
-        elif line.startswith("@@"):
-            lines.append(f"\033[36m{line}\033[0m")
-        elif line.startswith("+"):
-            lines.append(f"\033[32m{line}\033[0m")
-        elif line.startswith("-"):
-            lines.append(f"\033[31m{line}\033[0m")
-        else:
-            lines.append(line)
-
-    return "\n".join(lines)
+    return "\n".join(line.rstrip("\n") for line in diff)

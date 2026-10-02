@@ -25,29 +25,56 @@ BACKUP_DIR = (
 )
 BACKUP_INDEX = BACKUP_DIR / "index.json"
 
-# Катастрофичные команды — мгновенный отказ, без шанса подтвердить
 SHELL_BLACKLIST = [
-    r"\brm\s+-rf\s+/(?:\s|$)",           # rm -rf /
-    r"\brm\s+-rf\s+/\*",                  # rm -rf /*
-    r":\(\)\s*\{.*\};:",                  # fork bomb
-    r"\bdd\s+if=.*of=/dev/[sh]d",         # dd на диск
-    r"\bmkfs\b",                          # форматирование
+    r"\brm\s+-rf\s+/(?:\s|$)",
+    r"\brm\s+-rf\s+/\*",
+    r":\(\)\s*\{.*\};:",
+    r"\bdd\s+if=.*of=/dev/[sh]d",
+    r"\bmkfs\b",
     r"\b(shutdown|reboot|halt|poweroff)\b",
-    r">\s*/dev/[sh]d[a-z]",               # запись в raw device
-    r"\bchmod\s+-R\s+777\s+/(?:\s|$)",    # chmod 777 /
-    r"\bsudo\b",                          # sudo запрещён
-    r"\bcurl\b[^|]*\|\s*(?:sh|bash)\b",   # curl | sh
-    r"\bwget\b[^|]*\|\s*(?:sh|bash)\b",   # wget | sh
+    r">\s*/dev/[sh]d[a-z]",
+    r"\bchmod\s+-R\s+777\s+/(?:\s|$)",
+    r"\bsudo\b",
+    r"\bcurl\b[^|]*\|\s*(?:sh|bash)\b",
+    r"\bwget\b[^|]*\|\s*(?:sh|bash)\b",
 ]
 
 
 def _is_blacklisted(cmd: str) -> str | None:
-    """Вернуть описание нарушения или None, если всё ок."""
     lowered = cmd.lower()
     for pattern in SHELL_BLACKLIST:
         if re.search(pattern, lowered):
             return pattern
     return None
+
+
+# --- Контекст вывода/подтверждения (для Telegram и т.п.) ---
+_output_cb: Callable[[str], None] | None = None
+_confirm_cb: Callable[[], bool] | None = None
+
+
+def set_tool_context(
+    output_cb: Callable[[str], None] | None = None,
+    confirm_cb: Callable[[], bool] | None = None,
+) -> None:
+    """Установить колбэки вывода и подтверждения.
+
+    output_cb=None → вывод в stdout.
+    confirm_cb=None → подтверждение через input().
+    """
+    global _output_cb, _confirm_cb
+    _output_cb = output_cb
+    _confirm_cb = confirm_cb
+
+
+def _out(text: str = "") -> None:
+    if _output_cb is not None:
+        try:
+            _output_cb(text + "\n")
+            return
+        except Exception:
+            pass
+    print(text)
 
 
 # --- Бэкапы ---
@@ -97,30 +124,30 @@ def backup_file(path: Path) -> Path | None:
     return backup_path
 
 
-# --- Показ diff ---
+# --- Diff-превью ---
 
 def _print_preview(path: Path, new_content: str, existed: bool) -> None:
     import difflib
 
-    print()
+    _out()
     action = "изменить" if existed else "создать"
-    print(f"  📝 Предлагаю {action}: {path}")
-    print()
+    _out(f"📝 Предлагаю {action}: {path}")
+    _out()
 
     if not existed:
         lines = new_content.splitlines()
-        print(f"  +++ {path} (новый файл, {len(lines)} строк)")
+        _out(f"+++ {path} (новый файл, {len(lines)} строк)")
         for line in lines[:40]:
-            print(f"  + {line}")
+            _out(f"+ {line}")
         if len(lines) > 40:
-            print(f"  ... и ещё {len(lines) - 40} строк")
-        print()
+            _out(f"... и ещё {len(lines) - 40} строк")
+        _out()
         return
 
     try:
         old_content = path.read_text(encoding="utf-8")
     except Exception as e:
-        print(f"  (не удалось прочитать оригинал: {e})")
+        _out(f"(не удалось прочитать оригинал: {e})")
         return
 
     diff = list(difflib.unified_diff(
@@ -132,31 +159,26 @@ def _print_preview(path: Path, new_content: str, existed: bool) -> None:
     ))
 
     if not diff:
-        print("  (файл уже имеет такое содержимое)")
-        print()
+        _out("(файл уже имеет такое содержимое)")
+        _out()
         return
 
     shown = 0
     for line in diff:
         if shown >= 60:
-            print(f"  ... и ещё {len(diff) - shown} строк diff")
+            _out(f"... и ещё {len(diff) - shown} строк diff")
             break
-        line = line.rstrip("\n")
-        if line.startswith("+++") or line.startswith("---"):
-            print(f"  \033[1m{line}\033[0m")
-        elif line.startswith("@@"):
-            print(f"  \033[36m{line}\033[0m")
-        elif line.startswith("+"):
-            print(f"  \033[32m{line}\033[0m")
-        elif line.startswith("-"):
-            print(f"  \033[31m{line}\033[0m")
-        else:
-            print(f"  {line}")
+        _out(line.rstrip())
         shown += 1
-    print()
+    _out()
 
 
 def _ask_confirm() -> bool:
+    if _confirm_cb is not None:
+        try:
+            return bool(_confirm_cb())
+        except Exception:
+            return False
     if not sys.stdin.isatty():
         return False
     try:
@@ -239,19 +261,16 @@ def create_dir(path: str) -> str:
             return f"OK: директория уже существует: {path}"
         return f"ОШИБКА: {path} существует, но это файл."
 
-    if not sys.stdin.isatty():
-        return "ОШИБКА: подтверждение недоступно (stdin не терминал)."
-
     missing = _collect_missing_parents(p)
     full_chain = missing + [p]
 
-    print()
-    print(f"  📁 Предлагаю создать директорию: {path}")
+    _out()
+    _out(f"📁 Предлагаю создать директорию: {path}")
     if len(full_chain) > 1:
-        print(f"     (включая {len(full_chain) - 1} промежуточных)")
+        _out(f"   (включая {len(full_chain) - 1} промежуточных)")
     for d in full_chain:
-        print(f"     + {d}")
-    print()
+        _out(f"   + {d}")
+    _out()
 
     if not _ask_confirm():
         return "ОТМЕНЕНО пользователем."
@@ -275,16 +294,13 @@ def write_file(path: str, content: str) -> str:
             f"Для изменения используй edit_file."
         )
 
-    if not sys.stdin.isatty():
-        return "ОШИБКА: подтверждение записи недоступно (stdin не терминал)."
-
     missing_parents = _collect_missing_parents(p)
 
-    print()
+    _out()
     if missing_parents:
-        print(f"  📁 Попутно создадутся директории:")
+        _out("📁 Попутно создадутся директории:")
         for d in missing_parents:
-            print(f"     + {d}")
+            _out(f"   + {d}")
     _print_preview(p, content, existed=False)
 
     if not _ask_confirm():
@@ -322,7 +338,6 @@ def edit_file(path: str, old: str, new: str) -> str:
         return "ОШИБКА: пустой фрагмент old — нечего искать."
 
     count = content.count(old)
-
     if count == 0:
         return (
             f"ОШИБКА: фрагмент old не найден в {path}.\n"
@@ -336,9 +351,6 @@ def edit_file(path: str, old: str, new: str) -> str:
         )
 
     new_content = content.replace(old, new, 1)
-
-    if not sys.stdin.isatty():
-        return "ОШИБКА: подтверждение недоступно (stdin не терминал)."
 
     _print_preview(p, new_content, existed=True)
 
@@ -363,39 +375,25 @@ def edit_file(path: str, old: str, new: str) -> str:
     return f"OK: {path} обновлён{backup_note}"
 
 
-# --- run_shell ---
-
 def run_shell(cmd: str) -> str:
-    """Запустить shell-команду с подтверждением и таймаутом."""
     cmd = cmd.strip()
     if not cmd:
         return "ОШИБКА: пустая команда."
 
-    # Blacklist — до всяких подтверждений
     bad = _is_blacklisted(cmd)
     if bad:
         return (
-            f"ОТКАЗАНО: команда содержит запрещённый паттерн. "
-            f"Такие команды никогда не выполняются."
+            "ОТКАЗАНО: команда содержит запрещённый паттерн. "
+            "Такие команды никогда не выполняются."
         )
 
-    if not sys.stdin.isatty():
-        return "ОШИБКА: подтверждение недоступно (stdin не терминал)."
+    _out()
+    _out("⚡ Предлагаю выполнить:")
+    _out(f"   $ {cmd}")
+    _out(f"   (таймаут {DEFAULT_SHELL_TIMEOUT} сек, cwd: {os.getcwd()})")
+    _out()
 
-    # Показываем, что будем делать
-    print()
-    print(f"  ⚡ Предлагаю выполнить:")
-    print(f"     \033[1;33m$ {cmd}\033[0m")
-    print(f"     (таймаут {DEFAULT_SHELL_TIMEOUT} сек, cwd: {os.getcwd()})")
-    print()
-
-    try:
-        answer = input("  Запустить? [y/N]: ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return "ОТМЕНЕНО пользователем."
-
-    if answer not in ("y", "yes", "д", "да"):
+    if not _ask_confirm():
         return "ОТМЕНЕНО пользователем."
 
     try:
@@ -408,10 +406,7 @@ def run_shell(cmd: str) -> str:
             cwd=os.getcwd(),
         )
     except subprocess.TimeoutExpired:
-        return (
-            f"ОШИБКА: команда превысила таймаут {DEFAULT_SHELL_TIMEOUT} сек "
-            f"и была прервана."
-        )
+        return f"ОШИБКА: команда превысила таймаут {DEFAULT_SHELL_TIMEOUT} сек."
     except FileNotFoundError as e:
         return f"ОШИБКА: команда не найдена: {e}"
     except Exception as e:
@@ -420,7 +415,6 @@ def run_shell(cmd: str) -> str:
     stdout = proc.stdout or ""
     stderr = proc.stderr or ""
 
-    # Обрезаем
     if len(stdout) > MAX_SHELL_OUTPUT:
         stdout = stdout[:MAX_SHELL_OUTPUT] + f"\n[...обрезано, всего {len(stdout)}]"
     if len(stderr) > MAX_SHELL_OUTPUT:
@@ -462,7 +456,7 @@ TOOLS: dict[str, Tool] = {
     ),
     "create_dir": Tool(
         name="create_dir",
-        description="Создать директорию. Родительские создаются автоматически.",
+        description="Создать директорию.",
         schema='<create_dir path="путь/к/папке" />',
         handler=create_dir,
     ),
@@ -502,16 +496,10 @@ TOOLS: dict[str, Tool] = {
     "run_shell": Tool(
         name="run_shell",
         description=(
-            "Запустить shell-команду. Требует подтверждения пользователя. "
-            "Используй для запуска тестов, линтеров, git, компиляторов, "
-            "просмотра состояния системы. Работает в текущей директории. "
-            "Не выполняй катастрофичных команд — они будут отклонены."
+            "Запустить shell-команду. Требует подтверждения. "
+            "Для тестов, линтеров, git, компиляторов, просмотра состояния."
         ),
-        schema=(
-            '<run_shell>\n'
-            'команда\n'
-            '</run_shell>'
-        ),
+        schema='<run_shell>\nкоманда\n</run_shell>',
         handler=run_shell,
     ),
 }
@@ -580,7 +568,7 @@ def tools_prompt() -> str:
     lines = [
         "## Инструменты",
         "",
-        "Ты можешь вызывать инструменты, чтобы работать с системой пользователя.",
+        "Ты можешь вызывать инструменты для работы с системой пользователя.",
         "",
     ]
     for t in TOOLS.values():
@@ -592,20 +580,13 @@ def tools_prompt() -> str:
         "",
         "1. Посмотреть файл — read_file. Посмотреть папку — list_dir.",
         "2. Создать папку — create_dir. Создать файл — write_file.",
-        "3. Изменить существующий файл — edit_file (см. описание выше).",
-        "4. Запустить команду — run_shell. Пользователь подтвердит её перед запуском.",
-        "   Примеры: <run_shell>\\npytest -v\\n</run_shell> или "
-        "<run_shell>\\ngit status\\n</run_shell>",
+        "3. Изменить существующий файл — edit_file.",
+        "4. Запустить команду — run_shell.",
         "5. Выводи тег БЕЗ обёрток ```xml, только чистый XML.",
         "6. После вызова придёт <result>...</result> — продолжи или ответь текстом.",
-        "7. Не выдумывай содержимое файлов и результаты команд — "
-        "сначала читай / запускай, потом делай выводы.",
-        "8. Ты ПОЛУЧАЕШЬ <result>...</result> от системы, но НИКОГДА не пишешь "
-        "его сам. Если тебе нужно выполнить команду — выведи "
-        "<run_shell>...</run_shell> и дождись ответа системы. "
-        "Не выдумывай вывод команд.",
-        "9. Не пиши <result> в своём ответе — это системный тег, не твой.",
-        "10. Если для ответа нужно посмотреть файл или запустить команду — "
-        "сначала вызови инструмент, получи <result>, потом отвечай.",
+        "7. Не выдумывай содержимое файлов и результаты команд.",
+        "8. Ты ПОЛУЧАЕШЬ <result>, но НИКОГДА не пишешь его сам.",
+        "9. Не пиши <result> в своём ответе — это системный тег.",
+        "10. Сначала вызови инструмент, получи <result>, потом отвечай.",
     ]
     return "\n".join(lines)
